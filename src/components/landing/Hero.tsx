@@ -66,7 +66,7 @@ const Hero = () => {
       <motion.div
         initial={{ opacity: 0, y: 40 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4, duration: 0.8, ease }}
+        transition={{ delay: 0.4, duration: 0.8, ease: easeVal }}
         className="mt-16 relative w-full max-w-5xl aspect-video glass-panel rounded-2xl overflow-hidden"
       >
         {/* Dot grid background */}
