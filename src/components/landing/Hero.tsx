@@ -2,7 +2,9 @@ import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { Hand, Sparkles } from "lucide-react";
 
-const ease = [0.23, 1, 0.32, 1];
+const ease = [0.23, 1, 0.32, 1] as const;
+type EaseType = [number, number, number, number];
+const easeVal = ease as unknown as EaseType;
 
 const Hero = () => {
   const navigate = useNavigate();
