@@ -3,7 +3,7 @@ import * as fabric from "fabric";
 import { Tool, ThemeMode } from "./Toolbar";
 import { ShapeType } from "./ShapeTools";
 import { AnimatePresence, motion } from "framer-motion";
-import { useGestureWebSocket } from "../services/websocket";
+import { GestureCommand } from "../services/useGestureControl";
 
 interface CanvasBoardProps {
   activeTool: Tool;
@@ -14,6 +14,7 @@ interface CanvasBoardProps {
   setShowColors: (s: boolean) => void;
   setBrushColor: (c: string) => void;
   onCanvasReady: (canvas: fabric.Canvas) => void;
+  lastCommand: GestureCommand | null;
 }
 
 const colors = [
@@ -29,7 +30,8 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
   showColors,
   setShowColors,
   setBrushColor,
-  onCanvasReady
+  onCanvasReady,
+  lastCommand
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasElRef = useRef<HTMLCanvasElement>(null);
@@ -37,7 +39,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
   const [zoom, setZoom] = useState(1);
   const [objectCount, setObjectCount] = useState(0);
 
-  const { lastCommand, isConnected } = useGestureWebSocket();
+  const isConnected = !!lastCommand; // Assume connected if we are receiving any inference loop ticks
 
   const canvasBg = themeMode === "dark" ? "#0a0a0f" : themeMode === "light" ? "#ffffff" : "#1a1a2e";
 
@@ -81,7 +83,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
       if (newZoom > 20) newZoom = 20;
       if (newZoom < 0.01) newZoom = 0.01;
       
-      canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, newZoom);
+      canvas.zoomToPoint(new fabric.Point(opt.e.offsetX, opt.e.offsetY), newZoom);
       setZoom(newZoom);
       opt.e.preventDefault();
       opt.e.stopPropagation();
@@ -129,28 +131,72 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
     fabricCanvas.renderAll();
   }, [fabricCanvas, activeTool, brushColor, brushSize, canvasBg]);
 
+  // Prevent firing overlapping synthetic events
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [isPinching, setIsPinching] = useState(false);
+  const pointerEventRef = useRef<MouseEvent | null>(null);
+
   // Map WebSocket Commands to Canvas Actions
   useEffect(() => {
     if (!fabricCanvas || !lastCommand) return;
 
     const { gesture, x, y, dx, dy } = lastCommand;
+    
+    // x and y are normalized, map to canvas bounding rect matching what Fabric expects
+    const canvasRef = fabricCanvas.getElement();
+    const rect = canvasRef.getBoundingClientRect();
+    
+    // Screen absolute pixels:
+    const screenX = x * window.innerWidth;
+    const screenY = y * window.innerHeight;
 
-    // A simplistic implementation to translate backend gestures to canvas operations.
-    // In a real robust system, DRAW/ERASE events should stitch together paths rather than drawing circles,
-    // or simulate mousedown/mousemove events via synthetic events.
+    // Canvas relative pixels:
+    const canvasX = screenX - rect.left;
+    const canvasY = screenY - rect.top;
 
-    if (gesture === "DRAW" && x !== undefined && y !== undefined) {
-       // Draw point
-       const circle = new fabric.Circle({
-        left: x,
-        top: y,
-        radius: activeTool === "brush" ? brushSize * 1.5 : brushSize / 2,
-        fill: brushColor,
-        selectable: false
-       });
-       fabricCanvas.add(circle);
+    // Only process gestures that fall inside the canvas boundaries
+    if (screenX < rect.left || screenX > rect.right || screenY < rect.top || screenY > rect.bottom) {
+        if (isDrawing || isPinching) {
+            const fakeEvent = { clientX: screenX, clientY: screenY, type: 'mouseup' } as unknown as MouseEvent;
+            fabricCanvas._onMouseUp(fakeEvent);
+            fabricCanvas.isDrawingMode = false; // Force stop
+            setIsDrawing(false);
+            setIsPinching(false);
+            // Need to toggle back to maintain tool state
+            setTimeout(() => { if (activeTool === "pen" || activeTool === "brush") fabricCanvas.isDrawingMode = true; }, 50);
+        }
+        return;
     }
-    else if (gesture === "ERASE" && x !== undefined && y !== undefined) {
+
+    if (gesture === "DRAW") {
+        if (activeTool !== "pen" && activeTool !== "brush") return; // Need to be in a drawing tool
+
+        // Simulate drawing for Fabric.js
+        const fakeEvent = {
+            clientX: screenX,
+            clientY: screenY,
+            type: isDrawing ? 'mousemove' : 'mousedown',
+            preventDefault: () => {},
+            stopPropagation: () => {}
+        } as unknown as MouseEvent;
+
+        if (!isDrawing) {
+            fabricCanvas._onMouseDown(fakeEvent);
+            setIsDrawing(true);
+        } else {
+            fabricCanvas._onMouseMove(fakeEvent);
+        }
+    } 
+    else if (gesture === "ERASE") {
+        if (isDrawing) {
+            // Stop previous drawing action safely
+            const fakeEvent = { clientX: screenX, clientY: screenY, type: 'mouseup' } as unknown as MouseEvent;
+            fabricCanvas._onMouseUp(fakeEvent);
+            setIsDrawing(false);
+        }
+
+        // Erasing logic (Raycast)
+       else if (gesture === "ERASE" && x !== undefined && y !== undefined) {
         // Find objects under cursor and remove them
         const point = new fabric.Point(x, y);
         const objs = fabricCanvas.getObjects();
@@ -162,17 +208,66 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
             }
         }
     }
-    else if (gesture === "MOVE_CANVAS" && dx !== undefined && dy !== undefined) {
-        // Pan the canvas
-        const vpt = fabricCanvas.viewportTransform;
-        if (vpt) {
-            vpt[4] += dx;
-            vpt[5] += dy;
-            fabricCanvas.requestRenderAll();
-        }
     }
-    else if (gesture === "SELECT OBJECT" && x !== undefined && y !== undefined) {
-       // Future expansion: Select the object at (x,y)
+    else {
+        // Not drawing, if we were drawing -> trigger mouseup
+        if (isDrawing || isPinching) {
+            const fakeEvent = { clientX: screenX, clientY: screenY, type: 'mouseup' } as unknown as MouseEvent;
+            fabricCanvas._onMouseUp(fakeEvent);
+            if (isPinching) {
+                // If we dropped an object, trigger save history
+                fabricCanvas.fire('object:modified');
+            }
+            setIsDrawing(false);
+            setIsPinching(false);
+        }
+
+        if (gesture === "MOVE_CANVAS" && dx !== undefined && dy !== undefined) {
+             // Pan the canvas
+            const vpt = fabricCanvas.viewportTransform;
+            if (vpt) {
+                // Since moving hand left means canvas moves right
+                vpt[4] += dx * 20; // Multiple by 20 to speed up normalized distance panning
+                vpt[5] += dy * 20;
+                fabricCanvas.requestRenderAll();
+            }
+        }
+        else if (gesture === "PINCH") {
+           // Simulate grabbing shapes if in "select" tool
+           if (activeTool === "select" && !isPinching) {
+              const fakeEvent = {
+                  clientX: screenX,
+                  clientY: screenY,
+                  type: 'mousedown',
+                  preventDefault: () => {},
+                  stopPropagation: () => {}
+              } as unknown as MouseEvent;
+              // We dispatch down, and moving during PINCH will drag it if fabric natively picks it up
+              fabricCanvas._onMouseDown(fakeEvent);
+              setIsPinching(true);
+           }
+        }
+        else if (gesture === "PINCH_DRAG") {
+            if (activeTool === "select" && isPinching) {
+                const moveEvent = { clientX: screenX, clientY: screenY, type: 'mousemove', preventDefault: ()=>{}, stopPropagation: ()=>{} } as unknown as MouseEvent;
+                fabricCanvas._onMouseMove(moveEvent);
+            }
+        }
+        else if (gesture === "PINCH_ZOOM" && dy !== undefined) {
+             // Use dy (from baseEvent.y anchor) to zoom
+             let newZoom = fabricCanvas.getZoom();
+             const zoomDelta = dy > 0 ? -0.05 : 0.05; // Pinch moving Up zooms IN (negative dy because Y is down), moving Down zooms OUT.
+             // Wait, dy is difference in y. Y=0 is top, Y=1 is bottom. 
+             // Moving hand UP means smaller Y, so dy is negative. It should Zoom In.
+             // Moving hand DOWN means larger Y, so dy is positive. It should Zoom Out.
+             newZoom += (dy < 0 ? 0.05 : -0.05);
+
+             if (newZoom > 20) newZoom = 20;
+             if (newZoom < 0.1) newZoom = 0.1;
+
+             fabricCanvas.zoomToPoint(new fabric.Point(canvasX, canvasY), newZoom);
+             setZoom(newZoom);
+        }
     }
 
   }, [lastCommand]);

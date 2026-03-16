@@ -2,9 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { Video } from "lucide-react";
 
-export const CameraPreview = () => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
+export const CameraPreview = ({ videoRef }: { videoRef: React.RefObject<HTMLVideoElement | null> }) => {
   useEffect(() => {
     let stream: MediaStream | null = null;
     
@@ -26,7 +24,7 @@ export const CameraPreview = () => {
         stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, [videoRef]);
 
   return (
     <motion.div
@@ -44,7 +42,7 @@ export const CameraPreview = () => {
         autoPlay
         playsInline
         muted
-        className="w-full h-full object-cover -scale-x-100" // Flip horizontally
+        className="w-full h-full object-cover"
       />
     </motion.div>
   );

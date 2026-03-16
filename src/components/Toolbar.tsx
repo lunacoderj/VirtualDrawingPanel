@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   MousePointer2, Pencil, Paintbrush, Eraser, Shapes, Palette,
   Plus, Minus, FilePlus, FolderOpen, Save, Settings, Video,
-  Sun, Moon, Pipette, Move
+  Sun, Moon, Pipette, Move, Undo2, Redo2, ArrowUpFromLine, ArrowDownToLine
 } from "lucide-react";
 
 export type Tool = "select" | "pen" | "brush" | "eraser" | "shape" | "pan";
@@ -25,6 +25,12 @@ interface ToolbarProps {
   onNew: () => void;
   onOpen: () => void;
   onSave: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onBringForward: () => void;
+  onSendBackward: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 const ToolButton = ({ icon, active, onClick, label }: { icon: React.ReactNode; active?: boolean; onClick?: () => void; label?: string }) => (
@@ -47,7 +53,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   brushSize, setBrushSize,
   showCamera, setShowCamera,
   themeMode, setThemeMode,
-  onNew, onOpen, onSave
+  onNew, onOpen, onSave,
+  onUndo, onRedo, onBringForward, onSendBackward,
+  canUndo, canRedo
 }) => {
   return (
     <nav className="w-16 h-full border-r border-white/5 flex flex-col items-center py-4 gap-2 z-50 bg-background/80 backdrop-blur-xl shrink-0">
@@ -58,6 +66,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       <ToolButton icon={<Paintbrush className="w-4 h-4" />} active={activeTool === "brush"} onClick={() => setActiveTool("brush")} label="Brush" />
       <ToolButton icon={<Eraser className="w-4 h-4" />} active={activeTool === "eraser"} onClick={() => setActiveTool("eraser")} label="Eraser" />
       <ToolButton icon={<Shapes className="w-4 h-4" />} active={showShapes || activeTool === "shape"} onClick={() => {setShowShapes(!showShapes); if(!showShapes) setActiveTool("shape");}} label="Shapes" />
+
+      <div className="h-px w-8 bg-white/10 my-1 flex-shrink-0" />
+
+      <ToolButton icon={<Undo2 className={`w-4 h-4 ${!canUndo && "opacity-30"}`} />} onClick={onUndo} label="Undo" />
+      <ToolButton icon={<Redo2 className={`w-4 h-4 ${!canRedo && "opacity-30"}`} />} onClick={onRedo} label="Redo" />
+      <ToolButton icon={<ArrowUpFromLine className="w-4 h-4" />} onClick={onBringForward} label="Bring Forward" />
+      <ToolButton icon={<ArrowDownToLine className="w-4 h-4" />} onClick={onSendBackward} label="Send Backward" />
 
       <div className="h-px w-8 bg-white/10 my-1 flex-shrink-0" />
 
