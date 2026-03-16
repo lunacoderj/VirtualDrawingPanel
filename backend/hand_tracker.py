@@ -1,149 +1,89 @@
-"""
-hand_tracker.py
----------------
-Uses MediaPipe Hands to detect and track a single primary hand.
-Provides smoothed landmark positions and finger state (up/down).
-"""
-
 import cv2
+import math
 import mediapipe as mp
-import numpy as np
-from collections import deque
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 class HandTracker:
-    def __init__(self, static_mode=False, max_hands=2, min_detection_confidence=0.5,
-                 min_tracking_confidence=0.5, smoothing_window=5):
-        """
-        Initialise MediaPipe Hands and smoothing buffers.
-        :param smoothing_window: number of recent frames for moving average smoothing.
-        """
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=static_mode,
-            max_num_hands=max_hands,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
+    def __init__(self, smoothing_factor=0.5):
+        model_path = "hand_landmarker.task"
+        base_options = python.BaseOptions(model_asset_path=model_path)
+        
+        # We detect up to 2 hands initially so we can pick the closest one if a new one appears,
+        # but we only track one primary hand.
+        options = vision.HandLandmarkerOptions(
+            base_options=base_options,
+            num_hands=2,
+            running_mode=vision.RunningMode.IMAGE
         )
-        self.mp_draw = mp.solutions.drawing_utils
+        self.detector = vision.HandLandmarker.create_from_options(options)
+        
+        self.smoothing_factor = smoothing_factor
+        self.last_landmarks = None
+        
+        # Hand lock tracking
+        self.locked_hand_center = None
 
-        # Primary hand lock
-        self.primary_hand_id = None          # MediaPipe's tracking ID
-        self.lock_timeout = 30                # frames to wait before releasing lock
-        self.lock_counter = 0
+    def distance(self, p1, p2):
+        return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
-        # Smoothing buffers for each landmark (21 landmarks, x,y per landmark)
-        self.smoothing_window = smoothing_window
-        self.landmark_buffer = [deque(maxlen=smoothing_window) for _ in range(21)]
+    def get_center(self, landmarks):
+        """Calculate the rough center of a hand (using wrist and metacarpophalangeal joints)"""
+        x_sum = sum([lm[0] for lm in landmarks])
+        y_sum = sum([lm[1] for lm in landmarks])
+        return (x_sum / len(landmarks), y_sum / len(landmarks))
 
-        # Landmark connections for drawing (optional)
-        self.connections = self.mp_hands.HAND_CONNECTIONS
-
-    def find_hands(self, frame, draw=False):
-        """
-        Process frame, detect hands, and return annotated frame and list of hand data.
-        Each hand data: {'id': tracking_id, 'landmarks': list of (x,y) in pixel coords,
-                         'handedness': 'Left' or 'Right'}
-        """
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(rgb)
-
-        hands_data = []
-        if results.multi_hand_landmarks:
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # Get handedness
-                handedness = results.multi_handedness[idx].classification[0].label
-                tracking_id = idx  # MediaPipe doesn't provide persistent IDs; use index as temporary
-
-                # Convert landmarks to pixel coordinates and store
-                h, w, _ = frame.shape
-                landmarks_px = []
-                for lm in hand_landmarks.landmark:
-                    px, py = int(lm.x * w), int(lm.y * h)
-                    landmarks_px.append((px, py))
-
-                hands_data.append({
-                    'id': tracking_id,
-                    'landmarks': landmarks_px,
-                    'handedness': handedness
-                })
-
-                # Draw landmarks if requested
-                if draw:
-                    self.mp_draw.draw_landmarks(frame, hand_landmarks, self.connections)
-
-        # Apply hand locking logic
-        hands_data = self._lock_primary_hand(hands_data)
-
-        return frame, hands_data
-
-    def _lock_primary_hand(self, hands_data):
-        """
-        Maintain lock on one primary hand. If lock is active, return only that hand.
-        If no primary hand, lock onto the first detected hand.
-        If primary hand disappears for > lock_timeout frames, release lock.
-        """
-        if self.primary_hand_id is not None:
-            # Look for the hand with matching ID (using index as ID)
-            locked_hand = [h for h in hands_data if h['id'] == self.primary_hand_id]
-            if locked_hand:
-                self.lock_counter = 0
-                return locked_hand
-            else:
-                self.lock_counter += 1
-                if self.lock_counter > self.lock_timeout:
-                    self.primary_hand_id = None
-                    self.lock_counter = 0
-                return []          # no hand this frame
-        else:
-            # No primary hand yet – lock onto first detected hand
-            if hands_data:
-                self.primary_hand_id = hands_data[0]['id']
-                return [hands_data[0]]
-            else:
-                return []
-
-    def get_smoothed_landmarks(self, raw_landmarks):
-        """
-        Apply moving average smoothing to landmark positions.
-        Returns smoothed list of (x,y) tuples.
-        """
+    def smooth_landmarks(self, current_landmarks):
+        if self.last_landmarks is None:
+            self.last_landmarks = current_landmarks
+            return current_landmarks
+            
         smoothed = []
-        for i, (x, y) in enumerate(raw_landmarks):
-            self.landmark_buffer[i].append((x, y))
-            # Compute average of buffered positions
-            avg_x = int(np.mean([p[0] for p in self.landmark_buffer[i]]))
-            avg_y = int(np.mean([p[1] for p in self.landmark_buffer[i]]))
-            smoothed.append((avg_x, avg_y))
+        for curr, prev in zip(current_landmarks, self.last_landmarks):
+            # Exponential Moving Average
+            sx = prev[0] * self.smoothing_factor + curr[0] * (1 - self.smoothing_factor)
+            sy = prev[1] * self.smoothing_factor + curr[1] * (1 - self.smoothing_factor)
+            smoothed.append((sx, sy))
+            
+        self.last_landmarks = smoothed
         return smoothed
 
-    def get_finger_state(self, landmarks, handedness):
-        """
-        Determine which fingers are up.
-        Returns a list of 5 booleans: [thumb, index, middle, ring, pinky].
-        Uses landmark positions: tip ids 4,8,12,16,20; pip ids 3,6,10,14,18.
-        For thumb, compares x coordinate based on handedness.
-        """
-        finger_tips = [4, 8, 12, 16, 20]
-        finger_pips = [3, 6, 10, 14, 18]   # joints below the tips
+    def get_landmarks(self, frame):
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+        result = self.detector.detect(mp_image)
 
-        state = []
-        # Thumb (index 0)
-        tip = landmarks[finger_tips[0]]
-        pip = landmarks[finger_pips[0]]
-        if handedness == 'Right':
-            # Right hand: thumb up if tip.x < pip.x (thumb points left)
-            state.append(tip[0] < pip[0])
+        if not result.hand_landmarks:
+            self.locked_hand_center = None
+            self.last_landmarks = None
+            return None
+
+        best_hand_landmarks = None
+        
+        if len(result.hand_landmarks) == 1:
+            best_hand_landmarks = result.hand_landmarks[0]
         else:
-            # Left hand: thumb up if tip.x > pip.x
-            state.append(tip[0] > pip[0])
+            # We have multiple hands. Find the one closest to our last locked position.
+            if self.locked_hand_center is None:
+                # If we didn't have a lock, just take the first one
+                best_hand_landmarks = result.hand_landmarks[0]
+            else:
+                best_dist = float('inf')
+                for hand_lms in result.hand_landmarks:
+                    # Convert to normalized (x,y)
+                    pts = [(lm.x, lm.y) for lm in hand_lms]
+                    center = self.get_center(pts)
+                    dist = self.distance(center, self.locked_hand_center)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_hand_landmarks = hand_lms
 
-        # Other four fingers: up if tip.y < pip.y (y increases downward)
-        for i in range(1, 5):
-            tip = landmarks[finger_tips[i]]
-            pip = landmarks[finger_pips[i]]
-            state.append(tip[1] < pip[1])
+        # Extract (x,y) for the chosen hand
+        extracted = [(lm.x, lm.y) for lm in best_hand_landmarks]
+        
+        # Update lock
+        self.locked_hand_center = self.get_center(extracted)
+        
+        # Apply EMA smoothing
+        smoothed = self.smooth_landmarks(extracted)
 
-        return state
-
-    def release(self):
-        self.hands.close()
+        return smoothed
