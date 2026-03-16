@@ -221,14 +221,28 @@ const DrawingApp = () => {
     <main className="h-svh w-screen overflow-hidden flex bg-black relative">
       {/* Virtual Cursor */}
       <div 
-        className="pointer-events-none fixed z-[9999] w-4 h-4 rounded-full bg-red-500/80 border-2 border-white shadow-[0_0_15px_rgba(239,68,68,0.8)] transition-all duration-75 ease-out"
+        className="pointer-events-none fixed z-[9999] w-4 h-4 rounded-full bg-red-500/80 border-2 border-white shadow-[0_0_15px_rgba(239,68,68,0.8)] transition-all ease-out flex items-center justify-center isolate"
         style={{ 
             left: `${cursorPos.x}px`, 
             top: `${cursorPos.y}px`, 
             transform: 'translate(-50%, -50%)',
-            scale: lastCommand?.gesture === "PINCH" ? 0.8 : 1
+            scale: lastCommand?.gesture === "PINCH" ? 0.8 : 1,
+            transitionDuration: '50ms'
         }}
-      />
+      >
+        {lastCommand?.hover_progress ? (
+           <svg className="absolute w-8 h-8 -top-2 -left-2 transform -rotate-90 pointer-events-none" viewBox="0 0 32 32">
+             <circle 
+               cx="16" cy="16" r="14" 
+               stroke="white" 
+               strokeWidth="3" 
+               fill="none" 
+               strokeLinecap="round"
+               strokeDasharray={`${lastCommand.hover_progress * 88} 88`} 
+             />
+           </svg>
+        ) : null}
+      </div>
 
       <Toolbar
         activeTool={activeTool} setActiveTool={setActiveTool}
